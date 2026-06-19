@@ -1,106 +1,161 @@
+#include <assert.h>
+
 #include <vulkan/vulkan.h>
-#include <vulkan/vulkan_core.h>
 
 #include "KevDev_vulkan_util.h"
 #include "KevDev_vulkan_queue.h"
 #include "KevDev_vulkan_wrapper.h"
 
-
 namespace KevDevVK {
 
-    void VulkanQueue::Init(VkDevice Device, VkSwapchainKHR SwapChain, u32 QueueFamily, u32 QueueIndex)
-    {
+void VulkanQueue::Init(VkDevice Device, VkSwapchainKHR SwapChain, u32 QueueFamily, u32 QueueIndex)
+{
 	m_device = Device;
 	m_swapChain = SwapChain;
 
 	vkGetDeviceQueue(Device, QueueFamily, QueueIndex, &m_queue);
 
-	printf("Queue acquired\n");
+	VkResult res = vkGetSwapchainImagesKHR(Device, SwapChain, &m_numImages, NULL);
+	CHECK_VK_RESULT(res, "vkGetSwapchainImagesKHR");
 
-	CreateSemaphores();
+	CreateSyncObjects();
+}
 
-    }
+
+void VulkanQueue::Destroy()
+{
+	for (VkSemaphore& Sem : m_imageAvailableSems) {
+		vkDestroySemaphore(m_device, Sem, NULL);
+	}
+
+	for (VkSemaphore& Sem : m_renderFinishedSems) {
+		vkDestroySemaphore(m_device, Sem, NULL);
+	}	
+
+	for (VkFence& Fence : m_inFlightFences) {
+		vkDestroyFence(m_device, Fence, NULL);
+	}
+}
 
 
-    void VulkanQueue::Destroy()
-    {
-	vkDestroySemaphore(m_device, m_presentCompleteSem, nullptr); 
-	vkDestroySemaphore(m_device, m_renderCompleteSem, nullptr);
-    }
+void VulkanQueue::CreateSyncObjects()
+{
+	m_imageAvailableSems.resize(m_numImages);
+	
+	for (VkSemaphore& Sem : m_imageAvailableSems) {
+		Sem = KevDevVK::CreateSemaphore(m_device);
+	}
 
-    void VulkanQueue::CreateSemaphores()
-    {
-	m_presentCompleteSem = CreateSemaphore(m_device);
-	m_renderCompleteSem = CreateSemaphore(m_device);
-    }
+	m_renderFinishedSems.resize(m_numImages);
 
-    void VulkanQueue::WaitIdle()
-    {
+	for (VkSemaphore& Sem : m_renderFinishedSems) {
+		Sem = KevDevVK::CreateSemaphore(m_device);
+	}
+
+	m_inFlightFences.resize(m_numImages);
+
+	VkFenceCreateInfo fenceInfo = {
+		.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
+		.pNext = NULL,
+		.flags = VK_FENCE_CREATE_SIGNALED_BIT // Start signaled to avoid stalls
+	};	
+	
+	for (VkFence& Fence : m_inFlightFences) {
+		VkResult Res = vkCreateFence(m_device, &fenceInfo, NULL, &Fence);
+		CHECK_VK_RESULT(Res, "vkCreateFence");
+	}
+}
+
+
+void VulkanQueue::WaitIdle()
+{
 	vkQueueWaitIdle(m_queue);
-    }
+}
 
-    u32 VulkanQueue::AcquireNextImage()
-    {
-	u32 ImageIndex = 0;
-	VkResult res = vkAcquireNextImageKHR(m_device, m_swapChain, UINT64_MAX, m_presentCompleteSem, VK_NULL_HANDLE, &ImageIndex);
-	CHECK_VK_RESULT(res, "vkAcquireNextImageKHR\n");
-	return ImageIndex;
-    }
 
-    void VulkanQueue::SubmitSync(VkCommandBuffer CmbBuf)
-    {
+u32 VulkanQueue::AcquireNextImage()
+{
+	vkWaitForFences(m_device, 1, &m_inFlightFences[m_frameIndex], VK_TRUE, UINT64_MAX);
+    vkResetFences(m_device, 1, &m_inFlightFences[m_frameIndex]);
+
+	VkResult res = vkAcquireNextImageKHR(
+		m_device,
+		m_swapChain,
+		UINT64_MAX,
+		m_imageAvailableSems[m_frameIndex],
+		VK_NULL_HANDLE,
+		&m_acquiredImageIndex
+	);
+	CHECK_VK_RESULT(res, "vkAcquireNextImageKHR");
+
+	return m_acquiredImageIndex;
+}
+
+
+void VulkanQueue::SubmitSync(VkCommandBuffer CmbBuf)
+{
 	VkSubmitInfo SubmitInfo = {
-	    .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-	    .pNext = nullptr,
-	    .waitSemaphoreCount = 0,
-	    .pWaitSemaphores = VK_NULL_HANDLE,
-	    .pWaitDstStageMask = VK_NULL_HANDLE,
-	    .commandBufferCount = 1,
-	    .pCommandBuffers = &CmbBuf,
-	    .signalSemaphoreCount = 0,
-	    .pSignalSemaphores = VK_NULL_HANDLE
+		.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+		.pNext = NULL,
+		.waitSemaphoreCount = 0,
+		.pWaitSemaphores = VK_NULL_HANDLE,
+		.pWaitDstStageMask = VK_NULL_HANDLE,
+		.commandBufferCount = 1,
+		.pCommandBuffers = &CmbBuf,
+		.signalSemaphoreCount = 0,
+		.pSignalSemaphores = VK_NULL_HANDLE
 	};
 
-	VkResult res = vkQueueSubmit(m_queue, 1, &SubmitInfo, nullptr);
+	VkResult res = vkQueueSubmit(m_queue, 1, &SubmitInfo, NULL);
 	CHECK_VK_RESULT(res, "vkQueueSubmit\n");
+}
 
-    }
 
-    void VulkanQueue::SubmitAsync(VkCommandBuffer CmbBuf)
-    {
-	VkPipelineStageFlags waitFlags = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+void VulkanQueue::SubmitAsync(VkCommandBuffer CmdBuf)
+{
+	SubmitAsync(&CmdBuf, 1);
+}
 
-	VkSubmitInfo SubmitInfo = {
-	    .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-	    .pNext = nullptr,
-	    .waitSemaphoreCount = 1,
-	    .pWaitSemaphores = &m_presentCompleteSem,
-	    .pWaitDstStageMask = &waitFlags,
-	    .commandBufferCount = 1,
-	    .pCommandBuffers = &CmbBuf,
-	    .signalSemaphoreCount = 1,
-	    .pSignalSemaphores = &m_renderCompleteSem
-	};
+void VulkanQueue::SubmitAsync(VkCommandBuffer* pCmdBufs, int NumCmdBufs)
+{
+	VkPipelineStageFlags WaitStages[] = { VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT };
 
-	VkResult res = vkQueueSubmit(m_queue, 1, &SubmitInfo, nullptr);
-	CHECK_VK_RESULT(res, "vkQueueSubmit\n");
-    }
+	VkSubmitInfo submitInfo = {
+		.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+		.pNext = NULL,
+		.waitSemaphoreCount = 1,
+		.pWaitSemaphores = &m_imageAvailableSems[m_frameIndex],
+		.pWaitDstStageMask = WaitStages,
+		.commandBufferCount = (u32)NumCmdBufs,
+		.pCommandBuffers = pCmdBufs,
+		.signalSemaphoreCount = 1,
+		.pSignalSemaphores = &m_renderFinishedSems[m_acquiredImageIndex]
+	};	
 
-    void VulkanQueue::Present(u32 ImageIndex)
-    {
+	VkResult res = vkQueueSubmit(m_queue, 1, &submitInfo, m_inFlightFences[m_frameIndex]);
+	CHECK_VK_RESULT(res, "vkQueueSubmit");
+}
+
+
+void VulkanQueue::Present(u32 ImageIndex)
+{
+	assert(ImageIndex == m_acquiredImageIndex);
+
 	VkPresentInfoKHR PresentInfo = {
-	    .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
-	    .pNext = nullptr,
-	    .waitSemaphoreCount = 1,
-	    .pWaitSemaphores = &m_renderCompleteSem,
-	    .swapchainCount = 1,
-	    .pSwapchains = &m_swapChain,
-	    .pImageIndices = &ImageIndex
+		.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+		.pNext = NULL,
+		.waitSemaphoreCount = 1,
+		.pWaitSemaphores = &m_renderFinishedSems[m_acquiredImageIndex],
+		.swapchainCount = 1,
+		.pSwapchains = &m_swapChain,
+		.pImageIndices = &ImageIndex,
+		.pResults = NULL
 	};
 
 	VkResult res = vkQueuePresentKHR(m_queue, &PresentInfo);
-	CHECK_VK_RESULT(res, "vkQueuePresentKHR\n");
-    }
+	CHECK_VK_RESULT(res, "vkQueuePresentKHR");
 
+	m_frameIndex = (m_frameIndex + 1) % m_numImages;
+}
 
 }

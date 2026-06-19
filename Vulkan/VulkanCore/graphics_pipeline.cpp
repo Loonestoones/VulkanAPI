@@ -14,7 +14,8 @@ GraphicsPipeline::GraphicsPipeline(VkDevice Device, GLFWwindow* pWindow, VkRende
 								   const SimpleMesh* pMesh,
 								   int NumImages,
 								   std::vector<BufferAndMemory>& UniformBuffers,
-								   int UniformDataSize
+								   int UniformDataSize,
+								   bool DepthEnabled
 								  )
 {
 	m_device = Device;
@@ -146,6 +147,7 @@ GraphicsPipeline::GraphicsPipeline(VkDevice Device, GLFWwindow* pWindow, VkRende
 		.pViewportState = &VPCreateInfo,
 		.pRasterizationState = &RastCreateInfo,
 		.pMultisampleState = &PipelineMSCreateInfo,
+		.pDepthStencilState = DepthEnabled ? &DepthStencilState : VK_NULL_HANDLE,
 		.pColorBlendState = &BlendCreateInfo,
 		.layout = m_pipelineLayout,
 		.renderPass = RenderPass,
@@ -187,7 +189,7 @@ void GraphicsPipeline::CreateDescriptorSets(const SimpleMesh* pMesh, int NumImag
 {
     CreateDescriptorPool(NumImages);
 
-    CreateDescriptorSetLayout(UniformBuffers, UniformDataSize);
+    CreateDescriptorSetLayout(UniformBuffers, UniformDataSize, pMesh->m_pTex);
 
     AllocateDescriptorSets(NumImages);
 
@@ -196,21 +198,37 @@ void GraphicsPipeline::CreateDescriptorSets(const SimpleMesh* pMesh, int NumImag
 
 void GraphicsPipeline::CreateDescriptorPool(int NumImages)
 {
+    std::vector<VkDescriptorPoolSize> PoolSizes = {
+        {
+            .type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+            .descriptorCount = (u32)(NumImages * 4)
+        },
+        {
+            .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            .descriptorCount = (u32)(NumImages * 4)
+        },
+        {
+            .type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,  // ADD THIS
+            .descriptorCount = (u32)(NumImages * 4)
+        }
+    };
+
     VkDescriptorPoolCreateInfo PoolInfo = {
 	.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
 	.flags = 0,
 	.maxSets = (u32)NumImages,
-	.poolSizeCount = 0,
-	.pPoolSizes = nullptr
+	.poolSizeCount = (u32)PoolSizes.size(),
+	.pPoolSizes = PoolSizes.data()
     };
 
     VkResult res = vkCreateDescriptorPool(m_device, &PoolInfo, nullptr, &m_descriptorPool);
     CHECK_VK_RESULT(res, "vkCreateDescriptorPool");
-    printf("Descriptor pool created\n"); 
+    printf("Descriptor pool created\n");
 }
 
+
 void GraphicsPipeline::CreateDescriptorSetLayout(std::vector<BufferAndMemory>& UniformBuffers,
-						int UniformDataSize)
+						int UniformDataSize, VulkanTexture* pTex)
 {
     std::vector<VkDescriptorSetLayoutBinding> LayoutBindings;
 
@@ -230,8 +248,19 @@ void GraphicsPipeline::CreateDescriptorSetLayout(std::vector<BufferAndMemory>& U
 	.stageFlags = VK_SHADER_STAGE_VERTEX_BIT,
     };
 
+    VkDescriptorSetLayoutBinding FragmentShaderLayoutBinding = {
+	.binding = 2,
+	.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+	.descriptorCount = 1,
+	.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+    };
+
     if (UniformBuffers.size() > 0 ) {
 	LayoutBindings.push_back(VertexShaderLayoutBinding_Uniform);
+    }
+
+    if (pTex) {
+	LayoutBindings.push_back(FragmentShaderLayoutBinding);
     }
 
     VkDescriptorSetLayoutCreateInfo LayoutInfo = {
@@ -274,7 +303,15 @@ void GraphicsPipeline::UpdateDescriptorSets(const SimpleMesh* pMesh, int NumImag
 		.offset = 0,
 		.range = pMesh->m_vertexBufferSize,  // can also be VK_WHOLE_SIZE
 	};
-	
+
+	VkDescriptorImageInfo ImageInfo;
+
+	if (pMesh->m_pTex) {
+	    ImageInfo.sampler = pMesh->m_pTex->m_sampler;
+	    ImageInfo.imageView = pMesh->m_pTex->m_view;
+	    ImageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	}
+
 	std::vector<VkWriteDescriptorSet> WriteDescriptorSet;
 
 	for (size_t i = 0; i < NumImages; i++) {
@@ -312,8 +349,22 @@ void GraphicsPipeline::UpdateDescriptorSets(const SimpleMesh* pMesh, int NumImag
 			);
 		    }
 
-	vkUpdateDescriptorSets(m_device, 
-						   (u32)WriteDescriptorSet.size(), WriteDescriptorSet.data(), 
+		if (pMesh->m_pTex) {
+		    WriteDescriptorSet.push_back(
+			    VkWriteDescriptorSet{
+			    .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+			    .dstSet = m_descriptorSets[i],
+			    .dstBinding = 2,
+			    .dstArrayElement = 0,
+			    .descriptorCount = 1,
+			    .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+			    .pImageInfo = &ImageInfo
+			    }
+			);
+		    }
+
+	vkUpdateDescriptorSets(m_device,
+						   (u32)WriteDescriptorSet.size(), WriteDescriptorSet.data(),
 						   0, NULL);
 }
 

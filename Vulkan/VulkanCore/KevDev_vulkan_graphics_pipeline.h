@@ -24,7 +24,8 @@ public:
 					 const SimpleMesh* pMesh,
 					 int NumImages,
 					 std::vector<BufferAndMemory>& UniformBuffers,
-					 int UniformDataSize);
+					 int UniformDataSize,
+					 bool DepthEnabled);
 
 
 	~GraphicsPipeline();
@@ -35,7 +36,7 @@ private:
 	void CreateDescriptorPool(int NumImages);
 	void CreateDescriptorSets(const SimpleMesh* pMesh, int NumImages,
 				std::vector<BufferAndMemory>& UniformBuffers, int UniformDataSize );
-	void CreateDescriptorSetLayout(std::vector<BufferAndMemory>& UniformBuffers, int UniformDataSize);
+	void CreateDescriptorSetLayout(std::vector<BufferAndMemory>& UniformBuffers, int UniformDataSize, VulkanTexture* pTex);
 	void AllocateDescriptorSets(int NumImages);
 	void UpdateDescriptorSets(const SimpleMesh* pMesh, int NumImages, std::vector<BufferAndMemory>& UniformBuffers, int UniformDataSize);
 

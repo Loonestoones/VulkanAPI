@@ -1,6 +1,7 @@
 #include <vector>
 #include <assert.h>
 #include <vulkan/vulkan_core.h>
+#include <cstring>
 
 #include "KevDev_vulkan_core.h"
 #include "KevDev_vulkan_util.h"
@@ -8,6 +9,9 @@
 #include "KevDev_util.h"
 #include "KevDev_vulkan_device.h"
 #include "KevDev_vulkan_wrapper.h" 
+#include "KevDev_vulkan_simple_mesh.h"
+
+#include "ThirdParty/stb_image.h"
 
 namespace KevDevVK {
 
@@ -58,9 +62,11 @@ namespace KevDevVK {
 	printf("Vulkan instance destroyed\n");
     }
 
-    void VulkanCore::Init(const char* pAppName, GLFWwindow* pWindow)
+    void VulkanCore::Init(const char* pAppName, GLFWwindow* pWindow, bool DepthEnabled)
     {
 	m_pWindow = pWindow;
+	m_depthEnabled = DepthEnabled;
+	GetFramebufferSize(m_windowWidth, m_windowHeight);
 	CreateInstance(pAppName);
 	CreateDebugCallback();
 	CreateSurface();
@@ -71,6 +77,9 @@ namespace KevDevVK {
 	CreateCommandBufferPool();
 	m_queue.Init(m_device, m_swapChain, m_queueFamily, 0);
 	CreateCommandBuffers(1, &m_copyCmdBuf);
+	if (DepthEnabled) {
+	    CreateDepthResources();
+	}
     }
 
 
@@ -119,6 +128,8 @@ const VkImageView& VulkanCore::GetImageView(int Index) const
 
     void VulkanCore::CreateInstance(const char* pAppName)
     {
+	UpdateInstanceVersion();
+
 	std::vector<const char*> Layers = {
 	    "VK_LAYER_KHRONOS_validation"
 	};
@@ -132,7 +143,8 @@ const VkImageView& VulkanCore::GetImageView(int Index) const
 	    "VK_MVK_macos_surface",
 #endif
 #if defined (__linux__)
-	    "VK_KHR_xcb_surface",
+	    //"VK_KHR_xcb_surface",
+	    "VK_KHR_wayland_surface",
 #endif
 	    VK_EXT_DEBUG_UTILS_EXTENSION_NAME,
 	};
@@ -324,40 +336,6 @@ static VkSurfaceFormatKHR ChooseSurfaceFormatAndColorSpace(const std::vector<VkS
 }
 
 
-VkImageView CreateImageView(VkDevice Device, VkImage Image, VkFormat Format, VkImageAspectFlags AspectFlags,
-	VkImageViewType ViewType, u32 LayerCount, u32 mipLevels)
-{
-    VkImageViewCreateInfo ViewInfo =
-    {
-	.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-	.pNext = nullptr,
-	.flags = 0,
-	.image = Image,
-	.viewType = ViewType,
-	.format = Format,
-	.components = {
-	    .r = VK_COMPONENT_SWIZZLE_IDENTITY,
-	    .g = VK_COMPONENT_SWIZZLE_IDENTITY,
-	    .b = VK_COMPONENT_SWIZZLE_IDENTITY,
-	    .a = VK_COMPONENT_SWIZZLE_IDENTITY
-	},
-	.subresourceRange = {
-	    .aspectMask = AspectFlags,
-	    .baseMipLevel = 0,
-	    .levelCount = mipLevels,
-	    .baseArrayLayer = 0,
-	    .layerCount = LayerCount
-	}
-    };
-
-    VkImageView ImageView;
-    VkResult res = vkCreateImageView(Device, &ViewInfo, nullptr, &ImageView);
-    CHECK_VK_RESULT(res, "vkCreateImageView");
-    return ImageView;
-}
-
-
-
 void VulkanCore::CreateSwapChain()
 {
 	const VkSurfaceCapabilitiesKHR& SurfaceCaps = m_physDevices.Selected().m_surfaceCaps;
@@ -369,6 +347,16 @@ void VulkanCore::CreateSwapChain()
 
 	m_swapChainSurfaceFormat = ChooseSurfaceFormatAndColorSpace(m_physDevices.Selected().m_surfaceFormats);
 
+	// --- MINIMAL WAYLAND EXTENT PATCH START ---
+	VkExtent2D SwapchainExtent = SurfaceCaps.currentExtent;
+	if (SurfaceCaps.currentExtent.width == 0xFFFFFFFF) {
+		int width, height;
+		glfwGetFramebufferSize(m_pWindow, &width, &height);
+		SwapchainExtent.width = std::max(SurfaceCaps.minImageExtent.width, std::min(SurfaceCaps.maxImageExtent.width, static_cast<u32>(width)));
+		SwapchainExtent.height = std::max(SurfaceCaps.minImageExtent.height, std::min(SurfaceCaps.maxImageExtent.height, static_cast<u32>(height)));
+	}
+	// --- MINIMAL WAYLAND EXTENT PATCH END ---
+
 	VkSwapchainCreateInfoKHR SwapChainCreateInfo = {
 		.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
 		.pNext = NULL,
@@ -377,7 +365,7 @@ void VulkanCore::CreateSwapChain()
 		.minImageCount = NumImages,
 		.imageFormat = m_swapChainSurfaceFormat.format,
 		.imageColorSpace = m_swapChainSurfaceFormat.colorSpace,
-		.imageExtent = SurfaceCaps.currentExtent,
+		.imageExtent = SwapchainExtent, // <-- Changed from SurfaceCaps.currentExtent to our patched SwapchainExtent
 		.imageArrayLayers = 1,
 		.imageUsage = (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT),
 		.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE,
@@ -391,6 +379,8 @@ void VulkanCore::CreateSwapChain()
 
 	VkResult res = vkCreateSwapchainKHR(m_device, &SwapChainCreateInfo, NULL, &m_swapChain);
 	CHECK_VK_RESULT(res, "vkCreateSwapchainKHR\n");
+	m_swapchainExtent = SwapchainExtent;
+	m_swapchainExtent = SwapchainExtent;
 
 	printf("Swap chain created\n");
 
@@ -411,9 +401,10 @@ void VulkanCore::CreateSwapChain()
 	m_imageViews.resize(NumSwapChainImages);
 	for (u32 i = 0; i < NumSwapChainImages; i++) {
 		m_imageViews[i] = CreateImageView(m_device, m_images[i], m_swapChainSurfaceFormat.format, 
-		VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_VIEW_TYPE_2D, LayerCount, MipLevels);
+		VK_IMAGE_ASPECT_COLOR_BIT);
 	}
 }
+
 
 
 
@@ -461,7 +452,7 @@ void VulkanCore::FreeCommandBuffers(u32 Count, const VkCommandBuffer* pCmdBufs)
 
 VkRenderPass VulkanCore::CreateSimpleRenderPass()
 {
-    VkAttachmentDescription AttachDesc = {
+    VkAttachmentDescription ColorAttachment = {
 	.flags = 0,
 	.format = m_swapChainSurfaceFormat.format,
 	.samples = VK_SAMPLE_COUNT_1_BIT,
@@ -473,9 +464,28 @@ VkRenderPass VulkanCore::CreateSimpleRenderPass()
 	.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR
     };
 
-    VkAttachmentReference AttachRef = {
+    VkAttachmentReference ColorAttachRef = {
 	.attachment = 0,
 	.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
+    };
+
+    VkFormat DepthFormat = m_physDevices.Selected().m_depthFormat;
+
+    VkAttachmentDescription DepthAttachment = {
+	.flags = 0,
+	.format = DepthFormat,
+	.samples = VK_SAMPLE_COUNT_1_BIT,
+	.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+	.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+	.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+	.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+	.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+	.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL
+    };
+
+    VkAttachmentReference DepthAttachmentRef = {
+	.attachment = 1,
+	.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL
     };
 
     VkSubpassDescription SubpassDesc = {
@@ -484,19 +494,26 @@ VkRenderPass VulkanCore::CreateSimpleRenderPass()
 	.inputAttachmentCount = 0,
 	.pInputAttachments = nullptr,
 	.colorAttachmentCount = 1,
-	.pColorAttachments = &AttachRef,
+	.pColorAttachments = &ColorAttachRef,
 	.pResolveAttachments = nullptr,
-	.pDepthStencilAttachment = nullptr,
+	.pDepthStencilAttachment = m_depthEnabled ? &DepthAttachmentRef : NULL,
 	.preserveAttachmentCount = 0,
 	.pPreserveAttachments = nullptr
     };
+
+    std::vector<VkAttachmentDescription> Attachments;
+    Attachments.push_back(ColorAttachment);
+
+    if (m_depthEnabled) {
+	Attachments.push_back(DepthAttachment);
+    }
 
     VkRenderPassCreateInfo RenderPassCreateInfo = {
 	.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
 	.pNext = nullptr,
 	.flags = 0,
-	.attachmentCount = 1,
-	.pAttachments = &AttachDesc,
+	.attachmentCount = (u32)Attachments.size(),
+	.pAttachments = Attachments.data(),
 	.subpassCount = 1,
 	.pSubpasses = &SubpassDesc,
 	.dependencyCount = 0,
@@ -516,29 +533,33 @@ VkRenderPass VulkanCore::CreateSimpleRenderPass()
 
 std::vector<VkFramebuffer> VulkanCore::CreateFramebuffers(VkRenderPass RenderPass)
 {
-    m_frameBuffers.resize(m_images.size());
-
-    int WindowWidth, WindowHeight;
-    glfwGetWindowSize(m_pWindow, &WindowWidth, &WindowHeight);
-
-    VkResult res;
+    std::vector<VkFramebuffer> FrameBuffers;
+    FrameBuffers.resize(m_images.size());
 
     for (uint i = 0; i < m_images.size(); i++) {
-	VkFramebufferCreateInfo fbCreateInfo = {};
-	fbCreateInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-	fbCreateInfo.renderPass = RenderPass;
-	fbCreateInfo.attachmentCount = 1;
-	fbCreateInfo.pAttachments = &m_imageViews[i];
-	fbCreateInfo.width = WindowWidth;
-	fbCreateInfo.height = WindowHeight;
-	fbCreateInfo.layers = 1;
-res = vkCreateFramebuffer(m_device, &fbCreateInfo, nullptr, &m_frameBuffers[i]);
+	std::vector<VkImageView> Attachments;
+	Attachments.push_back(m_imageViews[i]);
+	if (m_depthEnabled) {
+	    Attachments.push_back(m_depthImages[i].m_view);
+	}
+
+	VkFramebufferCreateInfo fbCreateInfo = {
+	    .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
+	    .renderPass = RenderPass,
+	    .attachmentCount = (u32)Attachments.size(),
+	    .pAttachments = Attachments.data(),
+	    .width = (u32)m_windowWidth,
+	    .height = (u32)m_windowHeight,
+	    .layers =1
+	};
+
+	VkResult res = vkCreateFramebuffer(m_device, &fbCreateInfo, nullptr, &FrameBuffers[i]);
 	CHECK_VK_RESULT(res, "vkCreateFramebuffer\n");
     }
 
     printf("Framebuffers created\n");
 
-    return m_frameBuffers;
+    return FrameBuffers;
 }
 
 
@@ -632,7 +653,7 @@ BufferAndMemory VulkanCore::CreateBuffer(VkDeviceSize Size, VkBufferUsageFlags U
 
     //step 4: allocate mem
     VkMemoryAllocateInfo MemAllocInfo = {
-	.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO,
+	.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
 	.allocationSize = MemReqs.size,
 	.memoryTypeIndex = MemoryTypeIndex
     };
@@ -695,6 +716,12 @@ void VulkanCore::GetFramebufferSize(int& Width, int& Height) const
     glfwGetWindowSize(m_pWindow, &Width, &Height);
 }
 
+void VulkanCore::GetSwapchainExtent(uint32_t& Width, uint32_t& Height) const
+{
+    Width = m_swapchainExtent.width;
+    Height = m_swapchainExtent.height;
+}
+
 std::vector<BufferAndMemory> VulkanCore::CreateUniformBuffers(size_t Size)
 {
     std::vector<BufferAndMemory> UniformBuffers;
@@ -717,4 +744,249 @@ void BufferAndMemory::Update(VkDevice Device, const void* pData, size_t Size)
     vkUnmapMemory(Device, m_mem);
 }
 
+void BufferAndMemory::Destroy(VkDevice Device)
+{
+	if (m_mem) {
+		vkFreeMemory(Device, m_mem, NULL);
+	}
+	if (m_buffer) {
+		vkDestroyBuffer(Device, m_buffer, NULL);
+	}
+}
+
+
+void VulkanCore::CreateTexture(const char* pFilename, VulkanTexture& Tex)
+{
+    int ImageWidth = 0;
+    int ImageHeight = 0;
+    int ImageChannels = 0;
+
+    //step 1: load the image pixels
+    stbi_uc* pPixels = stbi_load(pFilename, &ImageWidth, &ImageHeight, &ImageChannels, STBI_rgb_alpha);
+
+    if (!pPixels) {
+	printf("Error loading texture from '%s'\n", pFilename);
+	exit(1);
+    }
+
+    //step 2: create image object and populate with pixels
+    VkFormat Format = VK_FORMAT_R8G8B8A8_UNORM;
+    CreateTextureImageFromData(Tex, pPixels, ImageWidth, ImageHeight, Format);
+
+    //step 3: release image pixels
+    stbi_image_free(pPixels);
+
+    //step 4: create image view
+    VkImageAspectFlags AspectFlags = VK_IMAGE_ASPECT_COLOR_BIT;
+    Tex.m_view = CreateImageView(m_device, Tex.m_image, Format, AspectFlags);
+
+    VkFilter MinFilter = VK_FILTER_LINEAR;
+    VkFilter MaxFilter = VK_FILTER_LINEAR;
+    VkSamplerAddressMode AddressMode = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+
+    //Step 5: create texture sampler
+    Tex.m_sampler = CreateTextureSampler(m_device, MinFilter, MaxFilter, AddressMode);
+
+    printf("Texture from '%s' created\n", pFilename);
+}
+
+void VulkanCore::CreateTextureImageFromData(VulkanTexture& Tex, const void* pPixels,
+	u32 ImageWidth, u32 ImageHeight, VkFormat TexFormat)
+{
+    VkImageUsageFlagBits Usage = (VkImageUsageFlagBits)(VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+	    VK_IMAGE_USAGE_SAMPLED_BIT);
+    VkMemoryPropertyFlagBits PropertyFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+    CreateImage(Tex, ImageWidth, ImageHeight, TexFormat, Usage, PropertyFlags);
+
+    UpdateTextureImage(Tex, ImageWidth, ImageHeight, TexFormat, pPixels);
+}
+
+void VulkanCore::CreateImage(VulkanTexture& Tex, u32 ImageWidth, u32 ImageHeight, VkFormat TexFormat,
+	                         VkImageUsageFlags UsageFlags, VkMemoryPropertyFlagBits PropertyFlags)
+{
+
+	/*VkImageFormatProperties imageFormatProperties;
+	vkGetPhysicalDeviceImageFormatProperties(m_physDevices.Selected().m_physDevice,
+		TexFormat,
+		VK_IMAGE_TYPE_2D,
+		VK_IMAGE_TILING_OPTIMAL,
+		UsageFlags,
+		VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT,
+		&imageFormatProperties);*/
+
+	VkImageCreateInfo ImageInfo = {
+		.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+		.pNext = NULL,
+		.flags = 0,
+		.imageType = VK_IMAGE_TYPE_2D,
+		.format = TexFormat,
+		.extent = VkExtent3D {.width = ImageWidth, .height = ImageHeight, .depth = 1 },
+		.mipLevels = 1,
+		.arrayLayers =1,
+		.samples = VK_SAMPLE_COUNT_1_BIT,
+		.tiling = VK_IMAGE_TILING_OPTIMAL,
+		.usage = UsageFlags,
+		.sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+		.queueFamilyIndexCount = 0,
+		.pQueueFamilyIndices = NULL,
+		.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+	};
+
+	// Step #1: create the image object
+	VkResult res = vkCreateImage(m_device, &ImageInfo, NULL, &Tex.m_image);
+	CHECK_VK_RESULT(res, "vkCreateImage error");
+
+	// Step 2: get the buffer memory requirements
+	VkMemoryRequirements MemReqs = { 0 };
+	vkGetImageMemoryRequirements(m_device, Tex.m_image, &MemReqs);
+	printf("Image requires %d bytes\n", (int)MemReqs.size);
+
+	// Step 3: get the memory type index
+	u32 MemoryTypeIndex = GetMemoryTypeIndex(MemReqs.memoryTypeBits, PropertyFlags);
+	printf("Memory type index %d\n", MemoryTypeIndex);
+
+	// Step 4: allocate memory
+	VkMemoryAllocateInfo MemAllocInfo = {
+		.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+		.pNext = NULL,
+		.allocationSize = MemReqs.size,
+		.memoryTypeIndex = MemoryTypeIndex
+	};
+
+	res = vkAllocateMemory(m_device, &MemAllocInfo, NULL, &Tex.m_mem);
+	CHECK_VK_RESULT(res, "vkAllocateMemory error");
+
+	// Step 5: bind memory
+	res = vkBindImageMemory(m_device, Tex.m_image, Tex.m_mem, 0);
+	CHECK_VK_RESULT(res, "vkBindBufferMemory error %d\n");
+}
+
+
+void VulkanCore::UpdateTextureImage(VulkanTexture& Tex, u32 ImageWidth, u32 ImageHeight, 
+								    VkFormat TexFormat, const void* pPixels)
+{
+	int BytesPerPixel = GetBytesPerTexFormat(TexFormat);
+
+	VkDeviceSize LayerSize = ImageWidth * ImageHeight * BytesPerPixel;	 
+	int LayerCount = 1;
+	VkDeviceSize ImageSize = LayerCount * LayerSize;
+
+	VkBufferUsageFlags Usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+	VkMemoryPropertyFlags Properties = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | 
+									   VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+
+	BufferAndMemory StagingTex = CreateBuffer(ImageSize, Usage, Properties);
+
+	StagingTex.Update(m_device, pPixels, ImageSize);
+
+	TransitionImageLayout(Tex.m_image, TexFormat, 
+						  VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+	
+	CopyBufferToImage(Tex.m_image, StagingTex.m_buffer, ImageWidth, ImageHeight);
+	
+	TransitionImageLayout(Tex.m_image, TexFormat, 
+						  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+
+	StagingTex.Destroy(m_device);
+}
+
+void VulkanCore::TransitionImageLayout(VkImage& Image, VkFormat Format,
+	VkImageLayout OldLayout, VkImageLayout NewLayout)
+{
+    BeginCommandBuffer(m_copyCmdBuf, VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT);
+
+    ImageMemBarrier(m_copyCmdBuf, Image, Format, OldLayout, NewLayout);
+
+    SubmitCopyCommand();
+}
+
+void VulkanCore::SubmitCopyCommand()
+{
+    vkEndCommandBuffer(m_copyCmdBuf);
+
+    m_queue.SubmitSync(m_copyCmdBuf);
+    
+    m_queue.WaitIdle();
+}
+
+void VulkanCore::CopyBufferToBuffer(VkBuffer Dst, VkBuffer Src, VkDeviceSize Size)
+{
+    BeginCommandBuffer(m_copyCmdBuf, VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT);
+
+    VkBufferCopy BufferCopy = {
+	.srcOffset = 0,
+	.dstOffset = 0,
+	.size = Size
+    };
+
+    vkCmdCopyBuffer(m_copyCmdBuf, Src, Dst, 1, &BufferCopy);
+
+    SubmitCopyCommand();
+}
+
+void VulkanCore::CopyBufferToImage(VkImage Dst, VkBuffer Src, u32 ImageWidth, u32 ImageHeight)
+{
+    BeginCommandBuffer(m_copyCmdBuf, VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT);
+
+    VkBufferImageCopy BufferImageCopy = {
+	.bufferOffset = 0,
+	.bufferRowLength = 0,
+	.bufferImageHeight = 0,
+	.imageSubresource = VkImageSubresourceLayers {
+	    .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+	    .mipLevel = 0,
+	    .baseArrayLayer = 0,
+	    .layerCount = 1
+	},
+	.imageOffset = VkOffset3D {.x = 0, .y = 0, .z = 0},
+	.imageExtent = VkExtent3D {.width = ImageWidth, .height = ImageHeight, .depth = 1}
+    };
+
+    vkCmdCopyBufferToImage(m_copyCmdBuf, Src, Dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+	    1, &BufferImageCopy);
+
+    SubmitCopyCommand();
+}
+
+void VulkanTexture::Destroy(VkDevice Device)
+{
+	if (m_sampler) {
+		vkDestroySampler(Device, m_sampler, NULL);
+	}
+	
+	if (m_view) {
+		vkDestroyImageView(Device, m_view, NULL);
+	}
+	
+	if (m_image) {
+		vkDestroyImage(Device, m_image, NULL);
+	}
+
+	if (m_mem) {
+		vkFreeMemory(Device, m_mem, NULL);
+	}	
+}
+
+void VulkanCore::CreateDepthResources()
+{
+    int NumSwapChainImages = (int)m_images.size();
+    
+    m_depthImages.resize(NumSwapChainImages);
+
+    VkFormat DepthFormat = m_physDevices.Selected().m_depthFormat;
+
+    for (int i = 0; i < NumSwapChainImages; i++ ){
+	VkImageUsageFlagBits Usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+	VkMemoryPropertyFlagBits PropertyFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+	CreateImage(m_depthImages[i], m_windowWidth, m_windowHeight, DepthFormat,
+		Usage, PropertyFlags);
+
+	VkImageLayout OldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	VkImageLayout NewLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+	TransitionImageLayout(m_depthImages[i].m_image, DepthFormat, OldLayout, NewLayout);
+	
+	m_depthImages[i].m_view = CreateImageView(m_device, m_depthImages[i].m_image,
+		DepthFormat, VK_IMAGE_ASPECT_DEPTH_BIT);
+    }
+}
 }

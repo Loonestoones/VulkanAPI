@@ -1,6 +1,7 @@
 #pragma once
 #include "KevDev_types.h"
 #include <string>
+#include <cstring>
 
 using namespace std;
 

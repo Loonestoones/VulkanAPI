@@ -1,47 +1,51 @@
+
 #pragma once
 
 #include <stdio.h>
 
 #include <vulkan/vulkan.h>
-#include <vulkan/vulkan_core.h>
-
+#include <vector>
 #include "KevDev_types.h"
 
 namespace KevDevVK{
 
-    class VulkanQueue {
+class VulkanQueue {
 
-	public:
-	    VulkanQueue() {}
+public:
+	VulkanQueue() {}
+	~VulkanQueue() {}
 
-	    ~VulkanQueue() {}
+	void Init(VkDevice Device, VkSwapchainKHR SwapChain, u32 QueueFamily, u32 QueueIndex);
 
-	    void Init(VkDevice Device, VkSwapchainKHR SwapChain, u32 QueueFamily, u32 QueueIndex);
+	void Destroy();
 
-	    void Destroy();
+	u32 AcquireNextImage();
 
-	    u32 AcquireNextImage();
+	void SubmitSync(VkCommandBuffer CmdBuf);
 
-	    void SubmitSync(VkCommandBuffer CmdBuf);
+	void SubmitAsync(VkCommandBuffer CmdBuf);
 
-	    void SubmitAsync(VkCommandBuffer CmdBuf);
+	void SubmitAsync(VkCommandBuffer* pCmdBufs, int NumCmdBufs);
 
-	    void Present(u32 ImageIndex);
+void Present(u32 ImageIndex);
 
-	    void WaitIdle();
+	void WaitIdle();
 
+	VkQueue GetHandle() const { return m_queue; }
 
-	private:
+private:
 
-	    void CreateSemaphores();
+	void CreateSyncObjects();
 
-	    VkDevice m_device = VK_NULL_HANDLE;
-	    VkSwapchainKHR m_swapChain = VK_NULL_HANDLE;
-	    VkQueue m_queue = VK_NULL_HANDLE;
-	    VkSemaphore m_renderCompleteSem;
-	    VkSemaphore m_presentCompleteSem;
-
-    };
-
+	VkDevice m_device = VK_NULL_HANDLE;
+	VkSwapchainKHR m_swapChain = VK_NULL_HANDLE;
+	VkQueue m_queue = VK_NULL_HANDLE;
+	std::vector<VkSemaphore> m_imageAvailableSems;
+	std::vector<VkSemaphore> m_renderFinishedSems;
+	std::vector<VkFence> m_inFlightFences;
+	u32 m_numImages = 0;
+	u32 m_frameIndex = 0;
+	u32 m_acquiredImageIndex = 0;
+};
 
 }

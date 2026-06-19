@@ -3,9 +3,10 @@
 #include <glm/glm.hpp>
 #include <glm/ext.hpp>
 
-#include "ogldev_math_3d.h"
+#include "KevDev_math_3d.h"
 #include "ogldev_glfw_camera_handler.h"
-#include "ogldev_camera_api.h"
+#include "KevDev_camera_api.h"
+
 
 static bool constexpr CAMERA_LEFT_HANDED = true;
 
@@ -81,14 +82,18 @@ private:
 	glm::vec3 CalcAcceleration();
 	void CalcVelocity(float dt);
 	void CalcCameraOrientation();
-	void SetUpVector();	
+
+	float m_yaw = 0.0f;
+	float m_pitch = 0.0f;
 
 	glm::mat4 m_persProjection = glm::mat4(0.0);
 	glm::vec3 m_cameraPos = glm::vec3(0.0f);
 	glm::quat m_cameraOrientation = glm::quat(glm::vec3(0.0f));
 	glm::vec3 m_velocity = glm::vec3(0.0f);
 	glm::vec2 m_oldMousePos = glm::vec2(0.0f);
-	glm::vec3 m_up = glm::vec3(0.0f);
+	glm::vec3 m_up = glm::vec3(0.0f, 1.0f, 0.0f);
+	glm::vec3 m_worldRight = glm::vec3(1.0f, 0.0f, 0.0f);
+
 	MouseState m_mouseState;
 	PersProjInfo m_persProjInfo;
 };
